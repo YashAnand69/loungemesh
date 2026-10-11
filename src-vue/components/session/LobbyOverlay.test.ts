@@ -297,4 +297,33 @@ describe('LobbyOverlay', () => {
 
     wrapper.unmount();
   });
+
+  it('notifies the embedding host after cancelling and releases local media', async () => {
+    const features = useSessionFeaturesStore();
+    features.lobbyEnabled = true;
+    features.localLobbyPending = true;
+    const stopSpy = vi.spyOn(useLocalStore(), 'stopAllLocalMedia').mockResolvedValue();
+    const leaveConfSpy = vi.spyOn(useConferenceStore(), 'leaveConference');
+    const postMessage = vi.fn();
+    const originalParent = Object.getOwnPropertyDescriptor(window, 'parent')!;
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true });
+    const { wrapper, router } = await mountWithApp(LobbyOverlay);
+    const routerSpy = vi.spyOn(router, 'push');
+    try {
+      await wrapper.find('.btnCancel').trigger('click');
+      await flushPromises();
+      expect(stopSpy).toHaveBeenCalledTimes(1);
+      expect(mockLeaveRoom).toHaveBeenCalledTimes(1);
+      expect(leaveConfSpy).toHaveBeenCalledTimes(1);
+      expect(mockDisconnect).toHaveBeenCalledTimes(1);
+      expect(postMessage).toHaveBeenCalledExactlyOnceWith(
+        { source: 'loungemesh', action: 'leave', event: 'hangup', type: 'hangup' },
+        '*',
+      );
+      expect(routerSpy).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+      Object.defineProperty(window, 'parent', originalParent);
+    }
+  });
 });

@@ -42,4 +42,23 @@ describe('KickedPage', () => {
 
     wrapper.unmount();
   });
+
+  it('notifies the embedding host instead of navigating inside the iframe', async () => {
+    const postMessage = vi.fn();
+    const originalParent = Object.getOwnPropertyDescriptor(window, 'parent')!;
+    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true });
+    const { wrapper, router } = await mountWithApp(KickedPage);
+    const pushSpy = vi.spyOn(router, 'push');
+    try {
+      await wrapper.find('.btnHome').trigger('click');
+      expect(postMessage).toHaveBeenCalledExactlyOnceWith(
+        { source: 'loungemesh', action: 'leave', event: 'hangup', type: 'hangup' },
+        '*',
+      );
+      expect(pushSpy).not.toHaveBeenCalled();
+    } finally {
+      wrapper.unmount();
+      Object.defineProperty(window, 'parent', originalParent);
+    }
+  });
 });
