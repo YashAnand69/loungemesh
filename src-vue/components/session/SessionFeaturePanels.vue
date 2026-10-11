@@ -108,8 +108,26 @@ const { push: pushNotes, flush: flushNotes, cancel: cancelNotes, dispose: dispos
   () => notesDraft.value,
     (text) => {
       if (!shouldPublishNotesDraft(text, features.sharedNotes)) return;
-      features.updateSharedNotes(text, true);
+      if (features.canModerate) {
+        features.updateSharedNotes(text, true);
+      } else {
+        const changeId = `mod-notes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const change = {
+          id: changeId,
+          type: 'notes' as const,
+          authorId: local.id || engine.getLocalUserId() || '',
+          authorName: conference.displayName || 'Participant',
+          payload: text,
+          timestamp: Date.now(),
+        };
+        features.addModerationChange(change, engine);
+        engine.sendCommand('mod_change', JSON.stringify({ action: 'propose', ...change }));
+      }
     },
+);
+
+const pendingNotesChanges = computed(() =>
+  features.pendingModerationChanges.filter((c) => c.type === 'notes'),
 );
 
 const canResetNotesToTemplate = computed(
@@ -252,13 +270,21 @@ const panelOpen = computed(
 const title = computed(() => {
   switch (features.panel) {
     case 'moderator':
-      return 'Moderator';
+      return features.isHost ? 'Host Controls & Settings' : 'Moderator Controls';
+    case 'participants':
+      return 'Participants';
     case 'notes':
       return 'Shared notes';
     default:
       return '';
   }
 });
+
+function isModeratorUser(uid: string): boolean {
+  if (uid === features.hostId) return false;
+  if (uid === local.id && features.isModerator) return true;
+  return !!features.userGrants[uid]?.moderator || conference.users[uid]?.properties?.role === 'moderator';
+}
 
 const featureCardStyle = computed(() => {
   const style = featureCardStyleForPanel(features.panel, {
@@ -267,7 +293,7 @@ const featureCardStyle = computed(() => {
     height: panelHeight,
     notesWidth,
   });
-  if (features.panel === 'moderator') {
+  if (features.panel === 'moderator' || features.panel === 'participants') {
     return {
       ...style,
       width: 'min(520px, calc(100vw - 32px))',
@@ -292,13 +318,13 @@ const featureCardStyle = computed(() => {
       </button>
     </template>
     <div v-if="features.panel === 'moderator'" class="body modBody">
-      <HostRoomSettingsSection v-if="features.isHost || features.isModerator" />
+      <HostRoomSettingsSection v-if="features.isHost" />
 
       <p v-if="features.stageMessage" class="stageMessage" role="status">{{ features.stageMessage }}</p>
 
       <section class="section">
         <div class="roomControls">
-          <label class="roomToggle">
+          <label v-if="features.isHost" class="roomToggle">
             <input v-model="features.lobbyEnabled" type="checkbox" @change="syncLobby" />
             <span>Lobby</span>
           </label>
@@ -310,7 +336,7 @@ const featureCardStyle = computed(() => {
             />
             <span>Allow presenter promotion</span>
           </label>
-          <label class="roomToggle" v-if="features.isHost || features.isModerator">
+          <label v-if="features.isHost" class="roomToggle">
             <input
               v-model="features.allowParticipantRecording"
               type="checkbox"
@@ -321,7 +347,7 @@ const featureCardStyle = computed(() => {
         </div>
         <p class="stageStatus">Presenter: <strong>{{ stageStatusLabel }}</strong></p>
         <div v-if="features.lobbyWaiting.length" class="lobbyBlock">
-          <p class="sectionHint">Waiting to join</p>
+          <p class="sectionHint">Waiting to join ({{ features.lobbyWaiting.length }})</p>
           <div v-for="w in features.lobbyWaiting" :key="w.id" class="lobbyRow">
             <span class="name" :title="w.email">{{ w.name }}</span>
             <span v-if="w.reason" class="reason" :title="w.reason">"{{ w.reason }}"</span>
@@ -331,7 +357,42 @@ const featureCardStyle = computed(() => {
         </div>
       </section>
 
-      <section class="section">
+      <section v-if="features.canModerate" class="section">
+        <h3 class="sectionTitle">Whiteboard & Notes Review</h3>
+        <p v-if="features.pendingModerationChanges.length === 0" class="sectionHint">
+          No pending changes to review.
+        </p>
+        <div v-else class="modQueueList" data-testid="mod-queue-list">
+          <div
+            v-for="item in features.pendingModerationChanges"
+            :key="item.id"
+            class="modQueueRow"
+          >
+            <div class="modQueueInfo">
+              <strong>{{ item.type === 'whiteboard' ? 'Whiteboard' : 'Notes' }}</strong>
+              <span class="modQueueAuthor">from {{ item.authorName }} (15s auto-approve)</span>
+            </div>
+            <div class="modQueueActions">
+              <button
+                type="button"
+                class="btnAccept"
+                @click="features.approveModerationChange(item.id, engine)"
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                class="btnReject"
+                @click="features.rejectModerationChange(item.id, engine)"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="features.isHost" class="section">
         <h3 class="sectionTitle">Feature access</h3>
         <p class="sectionHint">Default permissions for new participants.</p>
         <div class="grantTable" role="presentation">
@@ -369,9 +430,11 @@ const featureCardStyle = computed(() => {
           <div class="participantHead">
             <div class="participantMeta">
               <span class="name">{{ displayName(uid) }}</span>
-              <span v-if="uid === features.hostId" class="badge">Host</span>
-              <span v-else-if="uid === features.stageOccupantId" class="badge stageBadge">Presenter</span>
+              <span v-if="uid === features.hostId" class="badge hostBadge">👑 Host</span>
+              <span v-else-if="isModeratorUser(uid)" class="badge modBadge">🛡️ Moderator</span>
+              <span v-else-if="uid === features.stageOccupantId" class="badge stageBadge">🎤 Presenter</span>
               <span v-else-if="uid === features.invitedStageUserId" class="badge stageInvitedBadge">Invited</span>
+              <span v-else class="badge attendeeBadge">👤 Attendee</span>
             </div>
             <div class="modActions">
               <button
@@ -383,7 +446,7 @@ const featureCardStyle = computed(() => {
                 Make Presenter
               </button>
               <button
-                v-if="features.isHost && (uid === features.stageOccupantId || uid === features.invitedStageUserId)"
+                v-if="(features.isHost || features.isModerator) && (uid === features.stageOccupantId || uid === features.invitedStageUserId)"
                 type="button"
                 class="pill subtle"
                 @click="demoteUser(uid)"
@@ -391,7 +454,7 @@ const featureCardStyle = computed(() => {
                 {{ uid === features.stageOccupantId ? 'Remove presenter' : 'Cancel invite' }}
               </button>
               <button
-                v-if="uid !== features.hostId"
+                v-if="uid !== features.hostId && (features.isHost || !isModeratorUser(uid))"
                 type="button"
                 class="pill subtle iconBtnOnly"
                 title="Mute"
@@ -400,7 +463,7 @@ const featureCardStyle = computed(() => {
                 <AppIcon name="mic-off" :size="16" />
               </button>
               <button
-                v-if="uid !== features.hostId"
+                v-if="uid !== features.hostId && (features.isHost || !isModeratorUser(uid))"
                 type="button"
                 class="pill warn iconBtnOnly"
                 title="Remove"
@@ -410,7 +473,7 @@ const featureCardStyle = computed(() => {
               </button>
             </div>
           </div>
-          <div v-if="uid !== features.hostId" class="grantTable" role="presentation">
+          <div v-if="features.isHost && uid !== features.hostId" class="grantTable" role="presentation">
             <span class="grantCorner" aria-hidden="true" />
             <span
               v-for="key in (Object.keys(featureLabels) as FeatureKey[])"
@@ -431,6 +494,29 @@ const featureCardStyle = computed(() => {
                 @change="onUserGrantChange(uid, key, $event)"
               />
             </label>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <div v-else-if="features.panel === 'participants'" class="body modBody">
+      <section class="section">
+        <h3 class="sectionTitle">Participants ({{ participantIds.length }})</h3>
+        <p class="sectionHint">People currently in this meeting.</p>
+        <div
+          v-for="uid in participantIds"
+          :key="uid"
+          class="participantCard"
+          :class="{ isHost: uid === features.hostId, onStage: uid === features.stageOccupantId }"
+        >
+          <div class="participantHead">
+            <div class="participantMeta">
+              <span class="name">{{ displayName(uid) }}</span>
+              <span v-if="uid === features.hostId" class="badge hostBadge">👑 Host</span>
+              <span v-else-if="isModeratorUser(uid)" class="badge modBadge">🛡️ Moderator</span>
+              <span v-else-if="uid === features.stageOccupantId" class="badge stageBadge">🎤 Presenter</span>
+              <span v-else class="badge attendeeBadge">👤 Attendee</span>
+            </div>
           </div>
         </div>
       </section>
@@ -457,6 +543,35 @@ const featureCardStyle = computed(() => {
       </div>
 
       <template v-if="activeNotesTab === 'shared'">
+        <div
+          v-if="features.canModerate && pendingNotesChanges.length > 0"
+          class="notesModQueue"
+          data-testid="notes-mod-queue"
+        >
+          <div
+            v-for="item in pendingNotesChanges"
+            :key="item.id"
+            class="notesModRow"
+          >
+            <span class="notesModText">Notes edit from {{ item.authorName }} (15s auto-approve)</span>
+            <div class="notesModActions">
+              <button
+                type="button"
+                class="btnAccept"
+                @click="features.approveModerationChange(item.id, engine)"
+              >
+                Accept
+              </button>
+              <button
+                type="button"
+                class="btnReject"
+                @click="features.rejectModerationChange(item.id, engine)"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+        </div>
         <NotesEditor
           v-model="notesDraft"
           class="notesEditorWrap"
@@ -691,6 +806,27 @@ const featureCardStyle = computed(() => {
   border-radius: var(--radius-round);
   background: var(--btn-primary-bg);
   color: var(--btn-primary-fg);
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.badge.hostBadge {
+  background: linear-gradient(135deg, #f59e0b, #d97706);
+  color: #fff;
+}
+.badge.modBadge {
+  background: linear-gradient(135deg, #3b82f6, #1d4ed8);
+  color: #fff;
+}
+.badge.stageBadge {
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+}
+.badge.attendeeBadge {
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--color-mono30);
+  border: 1px solid rgba(148, 163, 184, 0.3);
 }
 .modActions {
   display: flex;
@@ -814,5 +950,81 @@ const featureCardStyle = computed(() => {
   font-weight: 500;
   color: var(--color-text-default, #1e293b);
   cursor: pointer;
+}
+.notesModQueue {
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.notesModRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--color-bg-inset, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--line-light);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+.notesModText {
+  font-size: var(--fs-small, 12px);
+  font-weight: 500;
+}
+.notesModActions, .modQueueActions {
+  display: flex;
+  gap: 6px;
+}
+.modQueueList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.modQueueRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--color-bg-inset, rgba(0, 0, 0, 0.04));
+  border: 1px solid var(--line-light);
+  border-radius: var(--radius-sm);
+}
+.modQueueInfo {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+}
+.modQueueAuthor {
+  font-size: 11px;
+  color: var(--color-mono30);
+}
+.btnAccept {
+  background: #10b981;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btnAccept:hover {
+  background: #059669;
+}
+.btnReject {
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btnReject:hover {
+  background: #dc2626;
 }
 </style>

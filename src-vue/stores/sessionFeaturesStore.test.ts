@@ -595,16 +595,30 @@ describe('sessionFeaturesStore', () => {
     features.isVerifiedHost = true;
     expect(features.isHost).toBe(true);
     expect(features.isModerator).toBe(true);
+    expect(features.isAttendee).toBe(false);
+    expect(features.userRole).toBe('host');
 
     // Case 2: isVerifiedHost is false, isVerifiedModerator is true
+    features.meetingExists = true;
+    features.hostId = 'other-host';
     features.isVerifiedHost = false;
     features.isVerifiedModerator = true;
+    expect(features.isHost).toBe(false);
     expect(features.isModerator).toBe(true);
+    expect(features.isAttendee).toBe(false);
+    expect(features.userRole).toBe('moderator');
 
     // Case 3: both verified are false, hostId is my local id
     features.isVerifiedModerator = false;
     features.hostId = 'host-id';
     expect(features.isModerator).toBe(true);
+    expect(features.isAttendee).toBe(false);
+
+    // Case 4: eventyayMeet is true, verified is false -> isModerator returns false even if hostId matches
+    features.eventyayMeet = true;
+    expect(features.isModerator).toBe(false);
+    expect(features.isAttendee).toBe(true);
+    expect(features.userRole).toBe('attendee');
   });
 
   it('returns false for isHost while fetching config', () => {
@@ -614,5 +628,252 @@ describe('sessionFeaturesStore', () => {
     features.hostId = 'my-id';
     features.isFetchingConfig = true;
     expect(features.isHost).toBe(false);
+  });
+
+  it('evaluates capability-based getters when eventyayMeet is active', () => {
+    const features = useSessionFeaturesStore();
+    features.eventyayMeet = true;
+    features.stagePromotionEnabled = true;
+
+    // With specific capabilities
+    features.capabilities = ['whiteboard', 'poll_manage', 'moderate'];
+    expect(features.canUseNotes).toBe(false);
+    expect(features.canUseWhiteboard).toBe(true);
+    expect(features.canUsePoll).toBe(true);
+    expect(features.canPromoteToStage).toBe(true);
+    expect(features.canClearWhiteboard).toBe(true);
+
+    // Without moderate capability
+    features.capabilities = ['notes'];
+    expect(features.canUseNotes).toBe(true);
+    expect(features.canUseWhiteboard).toBe(false);
+    expect(features.canUsePoll).toBe(false);
+    expect(features.canPromoteToStage).toBe(false);
+    expect(features.canClearWhiteboard).toBe(false);
+
+    // Empty capabilities falls back to localGrants
+    features.capabilities = [];
+    features.roomDefaults.whiteboard = true;
+    features.roomDefaults.poll = true;
+    expect(features.canUseWhiteboard).toBe(true);
+    expect(features.canUsePoll).toBe(true);
+
+    // isReviewer getter
+    features.eventyayRole = 'reviewer';
+    expect(features.isReviewer).toBe(true);
+    features.eventyayRole = 'moderator';
+    expect(features.isReviewer).toBe(true);
+    features.eventyayRole = 'attendee';
+    expect(features.isReviewer).toBe(false);
+  });
+
+  it('manages poll requests and evaluates poll request getters', () => {
+    const features = useSessionFeaturesStore();
+    const local = useLocalStore();
+    local.setMyID('attendee-1');
+
+    // Host cannot request poll
+    features.isVerifiedHost = true;
+    expect(features.canRequestPoll).toBe(false);
+    expect(features.canManagePoll).toBe(true);
+    expect(features.canAccessPoll).toBe(true);
+
+    // Moderator cannot request poll
+    features.isVerifiedHost = false;
+    features.isVerifiedModerator = true;
+    expect(features.canRequestPoll).toBe(false);
+    expect(features.canManagePoll).toBe(true);
+
+    // Regular attendee in eventyay can request poll
+    features.isVerifiedModerator = false;
+    features.eventyayMeet = true;
+    features.capabilities = ['notes'];
+    expect(features.canRequestPoll).toBe(true);
+    expect(features.canManagePoll).toBe(false);
+    expect(features.canAccessPoll).toBe(true);
+
+    features.capabilities = ['poll_manage'];
+    expect(features.canManagePoll).toBe(true);
+    features.capabilities = ['moderate'];
+    expect(features.canManagePoll).toBe(true);
+
+    // Guest in standard room without poll grant cannot request poll
+    features.setHost('other-host');
+    features.eventyayMeet = false;
+    features.capabilities = [];
+    features.roomDefaults.poll = false;
+    expect(features.canRequestPoll).toBe(false);
+    expect(features.canAccessPoll).toBe(false);
+
+    // Guest in standard room with poll grant can request poll
+    features.roomDefaults.poll = true;
+    expect(features.canRequestPoll).toBe(true);
+    expect(features.canAccessPoll).toBe(true);
+
+    // Adding and removing poll requests
+    const req1 = {
+      id: 'pr-1',
+      question: 'Topic?',
+      options: ['Tech', 'Design'],
+      requesterId: 'attendee-1',
+      requesterName: 'Attendee 1',
+      createdAt: 1000,
+    };
+    features.addPollRequest(req1);
+    features.addPollRequest(req1); // duplicate ignored
+    expect(features.pendingPollRequests).toHaveLength(1);
+    expect(features.myPendingPollRequest?.id).toBe('pr-1');
+
+    // Matching by myPendingPollRequestId
+    local.setMyID('someone-else');
+    expect(features.myPendingPollRequest).toBeUndefined();
+    features.myPendingPollRequestId = 'pr-1';
+    expect(features.myPendingPollRequest?.id).toBe('pr-1');
+
+    features.removePollRequest('pr-1');
+    expect(features.pendingPollRequests).toHaveLength(0);
+    expect(features.myPendingPollRequestId).toBe('');
+
+    // Clear poll requests
+    features.addPollRequest(req1);
+    features.myPendingPollRequestId = 'pr-1';
+    features.pollRequestNotice = 'Notice';
+    features.clearPollRequests();
+    expect(features.pendingPollRequests).toHaveLength(0);
+    expect(features.myPendingPollRequestId).toBe('');
+    expect(features.pollRequestNotice).toBe('');
+  });
+
+  it('manages whiteboard and notes moderation changes with auto-approval and manual review', () => {
+    vi.useFakeTimers();
+    const features = useSessionFeaturesStore();
+    const local = useLocalStore();
+
+    // canModerate getter tests
+    local.setMyID('u-host');
+    features.setHost('u-host');
+    expect(features.canModerate).toBe(true);
+
+    local.setMyID('u-guest');
+    expect(features.canModerate).toBe(false);
+
+    features.eventyayMeet = true;
+    features.capabilities = ['moderate'];
+    expect(features.canModerate).toBe(true);
+
+    features.capabilities = ['chat'];
+    expect(features.canModerate).toBe(false);
+    features.eventyayMeet = false;
+    features.capabilities = [];
+
+    // Mock engine
+    const mockEngine = { sendCommand: vi.fn() };
+
+    // 1. Whiteboard change with 15s auto-approval
+    const stroke = { id: 's1', color: '#000', width: 2, points: [{ x: 10, y: 10 }, { x: 20, y: 20 }] };
+    features.addModerationChange({
+      id: 'mc-wb-1',
+      type: 'whiteboard',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: stroke,
+      timestamp: Date.now(),
+    }, mockEngine);
+
+    // Duplicate ignored
+    features.addModerationChange({
+      id: 'mc-wb-1',
+      type: 'whiteboard',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: stroke,
+      timestamp: Date.now(),
+    }, mockEngine);
+    expect(features.pendingModerationChanges).toHaveLength(1);
+
+    // Advance 15s -> auto-approves
+    vi.advanceTimersByTime(15000);
+    expect(features.pendingModerationChanges).toHaveLength(0);
+    expect(features.whiteboardStrokes).toHaveLength(1);
+    expect(features.whiteboardStrokes[0].id).toBe('s1');
+
+    // 2. Notes change with manual approval
+    features.addModerationChange({
+      id: 'mc-notes-1',
+      type: 'notes',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: 'Updated notes',
+      timestamp: Date.now(),
+    }, mockEngine);
+    expect(features.pendingModerationChanges).toHaveLength(1);
+
+    features.approveModerationChange('mc-notes-1', mockEngine);
+    expect(features.pendingModerationChanges).toHaveLength(0);
+    expect(features.sharedNotes).toBe('Updated notes');
+    expect(mockEngine.sendCommand).toHaveBeenCalledWith(
+      'mod_change',
+      JSON.stringify({ action: 'approve', id: 'mc-notes-1' }),
+    );
+
+    // Approve unknown id does nothing
+    features.approveModerationChange('unknown-id', mockEngine);
+
+    // 3. Notes change with rejection
+    features.addModerationChange({
+      id: 'mc-notes-2',
+      type: 'notes',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: 'Rejected text',
+      timestamp: Date.now(),
+    }, mockEngine);
+    expect(features.pendingModerationChanges).toHaveLength(1);
+
+    features.rejectModerationChange('mc-notes-2', mockEngine);
+    expect(features.pendingModerationChanges).toHaveLength(0);
+    expect(features.sharedNotes).toBe('Updated notes'); // still previous notes
+    expect(mockEngine.sendCommand).toHaveBeenCalledWith(
+      'mod_change',
+      JSON.stringify({ action: 'reject', id: 'mc-notes-2' }),
+    );
+
+    // Reject unknown id does nothing
+    features.rejectModerationChange('unknown-id', mockEngine);
+
+    // 4. clearAllModerationTimers and resetForLeave
+    features.addModerationChange({
+      id: 'mc-wb-3',
+      type: 'whiteboard',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: stroke,
+      timestamp: Date.now(),
+    });
+    expect(features.pendingModerationChanges).toHaveLength(1);
+    features.clearAllModerationTimers();
+    expect(features.pendingModerationChanges).toHaveLength(0);
+
+    // resetForLeave also clears timers and Eventyay state
+    features.addModerationChange({
+      id: 'mc-wb-4',
+      type: 'whiteboard',
+      authorId: 'u-guest',
+      authorName: 'Guest',
+      payload: stroke,
+      timestamp: Date.now(),
+    });
+    features.setIntegrationAccess('moderator', ['moderate']);
+    expect(features.eventyayMeet).toBe(true);
+    expect(features.capabilities).toEqual(['moderate']);
+
+    features.resetForLeave();
+    expect(features.pendingModerationChanges).toHaveLength(0);
+    expect(features.eventyayMeet).toBe(false);
+    expect(features.eventyayRole).toBe('');
+    expect(features.capabilities).toEqual([]);
+    expect(features.isInvited).toBe(false);
+
+    vi.useRealTimers();
   });
 });

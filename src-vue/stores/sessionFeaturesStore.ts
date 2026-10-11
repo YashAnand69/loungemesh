@@ -35,8 +35,27 @@ export type ActivePoll = {
   options: PollOption[];
   open: boolean;
 };
+export type PollRequest = {
+  id: string;
+  question: string;
+  options: string[];
+  requesterId: string;
+  requesterName: string;
+  createdAt: number;
+};
 export type UserReaction = { emoji: string; at: number };
 export type { WhiteboardStroke };
+
+export type ModerationChangeType = 'whiteboard' | 'notes';
+export type ModerationChange = {
+  id: string;
+  type: ModerationChangeType;
+  authorId: string;
+  authorName: string;
+  payload: any;
+  timestamp: number;
+  autoApproveTimer?: any;
+};
 
 export type StagePipCorner = 'tl' | 'tr' | 'bl' | 'br';
 
@@ -72,6 +91,9 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     userReactions: {} as Record<string, UserReaction>,
     activePoll: null as ActivePoll | null,
     myPollVote: '',
+    pendingPollRequests: [] as PollRequest[],
+    myPendingPollRequestId: '',
+    pollRequestNotice: '',
     sharedNotes: '',
     gridBackgroundUrl: '',
     notesTemplate: '',
@@ -85,7 +107,7 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     whiteboardSnapshots: [] as Array<WhiteboardStroke[]>,
     roomDefaults: defaultUserGrants(),
     userGrants: {} as Record<string, Partial<UserGrants>>,
-    panel: '' as '' | 'reactions' | 'poll' | 'moderator' | 'notes' | 'whiteboard' | 'chat',
+    panel: '' as '' | 'reactions' | 'poll' | 'moderator' | 'participants' | 'notes' | 'whiteboard' | 'chat',
     pendingHostClaim: false,
     notesActivitySeq: 0,
     notesSeenSeq: 0,
@@ -102,8 +124,18 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     meetingExists: false,
     configLoaded: false,
     isFetchingConfig: false,
+    eventyayMeet: false,
+    eventyayRole: '' as string,
+    capabilities: [] as string[],
+    pendingModerationChanges: [] as ModerationChange[],
   }),
   getters: {
+    canModerate(): boolean {
+      if (this.eventyayMeet && this.capabilities.length > 0) {
+        return this.capabilities.includes('moderate');
+      }
+      return this.isHost || this.isModerator;
+    },
     hasUnreadNotes(): boolean {
       return this.notesActivitySeq > this.notesSeenSeq;
     },
@@ -115,6 +147,7 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     },
     isHost(): boolean {
       if (this.isVerifiedHost) return true;
+      if (this.eventyayMeet) return false;
       const local = useLocalStore();
       if (!local.id) return false;
       if (this.isFetchingConfig) {
@@ -128,10 +161,22 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     },
     isModerator(): boolean {
       if (this.isVerifiedHost || this.isVerifiedModerator) return true;
+      if (this.eventyayMeet) return false;
       const local = useLocalStore();
       if (!local.id) return false;
       if (this.hostId === local.id) return true;
       return !!this.userGrants[local.id]?.moderator;
+    },
+    isAttendee(): boolean {
+      return !this.isHost && !this.isModerator;
+    },
+    userRole(): 'host' | 'moderator' | 'attendee' {
+      if (this.isHost) return 'host';
+      if (this.isModerator) return 'moderator';
+      return 'attendee';
+    },
+    isReviewer(): boolean {
+      return this.eventyayRole === 'moderator' || this.eventyayRole === 'reviewer';
     },
     localGrants(): UserGrants {
       const local = useLocalStore();
@@ -143,15 +188,47 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       );
     },
     canUseNotes(): boolean {
+      if (this.eventyayMeet && this.capabilities.length > 0) {
+        return this.capabilities.includes('notes');
+      }
       return this.localGrants.notes;
     },
     canUseWhiteboard(): boolean {
+      if (this.eventyayMeet && this.capabilities.length > 0) {
+        return this.capabilities.includes('whiteboard');
+      }
       return this.localGrants.whiteboard;
     },
     canUsePoll(): boolean {
+      if (this.eventyayMeet && this.capabilities.length > 0) {
+        return this.capabilities.includes('poll_manage');
+      }
       return this.localGrants.poll;
     },
+    canRequestPoll(): boolean {
+      if (this.isHost || this.isModerator) return false;
+      return this.canUsePoll || this.eventyayMeet;
+    },
+    canManagePoll(): boolean {
+      if (this.isHost || this.isModerator) return true;
+      if (this.eventyayMeet && (this.capabilities.includes('poll_manage') || this.capabilities.includes('moderate'))) {
+        return true;
+      }
+      return false;
+    },
+    canAccessPoll(): boolean {
+      return this.canUsePoll || this.isHost || this.isModerator || this.eventyayMeet;
+    },
+    myPendingPollRequest(): PollRequest | undefined {
+      const local = useLocalStore();
+      return this.pendingPollRequests.find(
+        (r) => r.id === this.myPendingPollRequestId || (local.id && r.requesterId === local.id),
+      );
+    },
     canPromoteToStage(): boolean {
+      if (this.eventyayMeet) {
+        return this.capabilities.includes('moderate') && this.stagePromotionEnabled;
+      }
       return this.isHost && this.stagePromotionEnabled;
     },
     isStageModeActive(): boolean {
@@ -169,6 +246,9 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       return local.onStage;
     },
     canClearWhiteboard(): boolean {
+      if (this.eventyayMeet && this.capabilities.length > 0) {
+        return this.capabilities.includes('moderate');
+      }
       return this.isHost || this.isModerator;
     },
     isLobbyBlocked(): boolean {
@@ -251,6 +331,22 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       if (!tracksVoters) return;
       const voted = this.activePoll.options.find((o) => o.voters?.includes(voterId));
       this.myPollVote = voted?.id ?? '';
+    },
+    addPollRequest(req: PollRequest) {
+      if (!this.pendingPollRequests.some((r) => r.id === req.id)) {
+        this.pendingPollRequests.push(req);
+      }
+    },
+    removePollRequest(id: string) {
+      this.pendingPollRequests = this.pendingPollRequests.filter((r) => r.id !== id);
+      if (this.myPendingPollRequestId === id) {
+        this.myPendingPollRequestId = '';
+      }
+    },
+    clearPollRequests() {
+      this.pendingPollRequests = [];
+      this.myPendingPollRequestId = '';
+      this.pollRequestNotice = '';
     },
     addWhiteboardStroke(stroke: WhiteboardStroke, isLocal = false) {
       this.whiteboardStrokes = mergeWhiteboardStroke(this.whiteboardStrokes, stroke);
@@ -488,7 +584,7 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
     togglePanel(name: typeof this.panel) {
       if (name === 'notes' && !this.canUseNotes && !this.isHost && !this.isModerator) return;
       if (name === 'whiteboard' && !this.canUseWhiteboard && !this.isHost && !this.isModerator) return;
-      if (name === 'poll' && !this.canUsePoll && !this.isHost && !this.isModerator) return;
+      if (name === 'poll' && !this.canAccessPoll) return;
       if (name === 'moderator' && !this.isHost && !this.isModerator) return;
       const opening = this.panel !== name;
       this.panel = opening ? name : '';
@@ -523,6 +619,7 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       this.lobbyRejected = false;
       this.roomDefaults = defaultUserGrants();
       this.userGrants = {};
+      this.clearPollRequests();
       this.gridBackgroundUrl = '';
       this.notesTemplate = '';
       this.hostSettingsSessionId = '';
@@ -544,10 +641,76 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       this.meetingExists = false;
       this.configLoaded = false;
       this.isFetchingConfig = false;
+      this.eventyayMeet = false;
+      this.eventyayRole = '';
+      this.capabilities = [];
+      this.isInvited = false;
+      this.clearAllModerationTimers();
+    },
+    addModerationChange(change: Omit<ModerationChange, 'autoApproveTimer'>, engine?: any) {
+      if (this.pendingModerationChanges.some((c) => c.id === change.id)) return;
+
+      const timer = setTimeout(() => {
+        this.approveModerationChange(change.id, engine, true);
+      }, 15000);
+
+      this.pendingModerationChanges.push({
+        ...change,
+        autoApproveTimer: timer,
+      });
+    },
+    approveModerationChange(id: string, engine?: any, isAuto = false) {
+      const index = this.pendingModerationChanges.findIndex((c) => c.id === id);
+      if (index === -1) return;
+      const item = this.pendingModerationChanges[index];
+      clearTimeout(item.autoApproveTimer);
+      this.pendingModerationChanges.splice(index, 1);
+
+      if (item.type === 'whiteboard') {
+        this.addWhiteboardStroke(item.payload);
+        this.bumpWhiteboardActivity();
+      } else {
+        this.updateSharedNotes(item.payload, true);
+      }
+
+      if (!isAuto && engine) {
+        engine.sendCommand('mod_change', JSON.stringify({
+          action: 'approve',
+          id: item.id,
+        }));
+      }
+    },
+    rejectModerationChange(id: string, engine?: any) {
+      const index = this.pendingModerationChanges.findIndex((c) => c.id === id);
+      if (index === -1) return;
+      const item = this.pendingModerationChanges[index];
+      clearTimeout(item.autoApproveTimer);
+      this.pendingModerationChanges.splice(index, 1);
+
+      if (engine) {
+        engine.sendCommand('mod_change', JSON.stringify({
+          action: 'reject',
+          id: item.id,
+        }));
+      }
+    },
+    clearAllModerationTimers() {
+      for (const c of this.pendingModerationChanges) {
+        clearTimeout(c.autoApproveTimer);
+      }
+      this.pendingModerationChanges = [];
     },
     /* v8 ignore start */
     setVerifiedHost(verified: boolean) {
       this.isVerifiedHost = verified;
+    },
+    setIntegrationAccess(role: string, capabilities: string[]) {
+      this.eventyayMeet = true;
+      this.eventyayRole = role;
+      this.capabilities = capabilities;
+      this.isVerifiedHost = role === 'host';
+      this.isVerifiedModerator = role === 'moderator';
+      this.isInvited = true;
     },
     setAllowParticipantRecording(value: boolean) {
       this.allowParticipantRecording = value;
@@ -564,7 +727,7 @@ export const useSessionFeaturesStore = defineStore('sessionFeatures', {
       const id = local.id;
       if (!id) return;
 
-      const isHost = this.isVerifiedHost || (!this.meetingExists && !this.hostId);
+      const isHost = this.isVerifiedHost || (!this.eventyayMeet && !this.meetingExists && !this.hostId);
 
       if (isHost) {
         this.hostId = id;

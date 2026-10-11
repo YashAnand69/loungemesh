@@ -45,6 +45,7 @@ import { useSessionRecording } from '@/composables/useSessionRecording';
 import { useSessionExport } from '@/composables/useSessionExport';
 import { makeRecorderSources } from '@/utils/sessionRecorderSources';
 import { playUiSound } from '@/utils/uiSounds';
+import { minScale, defaultScale } from '@/constants/pan';
 
 /** Absorbs `props: true` route param so it is not forwarded as a stray DOM attribute (multi-root page). */
 /* v8 ignore next */
@@ -63,8 +64,16 @@ const router = useRouter();
 
 // Pinia can preserve pan/zoom across navigations; force a deterministic recenter per session.
 watch(
-  () => identifier.value,
-  () => local.resetViewportForRoom(),
+  [() => identifier.value, () => route.query.zoom],
+  () => {
+    /* v8 ignore next 6 */
+    const shouldZoomOut =
+      route.query.zoom === 'out' ||
+      route.query.zoom === 'min' ||
+      (typeof window !== 'undefined' && window.self !== window.top && route.query.zoom !== 'in');
+    const targetScale = shouldZoomOut ? minScale : defaultScale;
+    local.resetViewportForRoom(targetScale);
+  },
   { immediate: true },
 );
 
@@ -94,6 +103,15 @@ function approve(entryId: string) {
 function reject(entryId: string) {
   engine.sendCommand('lobby', JSON.stringify({ action: 'reject', id: entryId }));
   features.rejectLobby(entryId);
+}
+
+const latestLobbyWaiter = computed(() => features.lobbyWaiting[0] || null);
+
+function admitAll() {
+  const waiters = [...features.lobbyWaiting];
+  for (const w of waiters) {
+    approve(w.id);
+  }
 }
 
 function requestLeave() {
@@ -208,6 +226,101 @@ onBeforeUnmount(() => {
     mode="audience"
   />
   <p v-if="features.stageMessage" class="stageToast" role="status">{{ features.stageMessage }}</p>
+
+  <!-- Google Meet-Style Floating Admission Banner for Host & Moderator -->
+  <Transition name="slide-down">
+    <div
+      v-if="(features.isHost || features.isModerator) && latestLobbyWaiter"
+      class="gmeetLobbyBanner"
+      role="alert"
+    >
+      <div class="bannerAvatar">
+        {{ (latestLobbyWaiter.name || 'G').slice(0, 2).toUpperCase() }}
+      </div>
+      <div class="bannerText">
+        <strong class="bannerName">{{ latestLobbyWaiter.name }}</strong>
+        <span class="bannerSubtitle">
+          {{ features.lobbyWaiting.length > 1 ? `and ${features.lobbyWaiting.length - 1} other(s) want to join` : 'wants to join this call' }}
+        </span>
+        <span v-if="latestLobbyWaiter.reason" class="bannerReason">"{{ latestLobbyWaiter.reason }}"</span>
+      </div>
+      <div class="bannerActions">
+        <button
+          type="button"
+          class="btnBannerDeny"
+          title="Deny entry"
+          @click="reject(latestLobbyWaiter.id)"
+        >
+          Deny
+        </button>
+        <button
+          type="button"
+          class="btnBannerAdmit"
+          title="Admit to meeting"
+          @click="approve(latestLobbyWaiter.id)"
+        >
+          Admit
+        </button>
+        <button
+          v-if="features.lobbyWaiting.length > 1"
+          type="button"
+          class="btnBannerAdmitAll"
+          title="Admit all waiting participants"
+          @click="admitAll"
+        >
+          Admit all ({{ features.lobbyWaiting.length }})
+        </button>
+      </div>
+    </div>
+  </Transition>
+
+  <!-- Session Role Status Pill -->
+  <div class="sessionRoleBadge" :class="`role-${features.userRole}`">
+    <span v-if="features.isHost" class="badgeItem hostBadge">
+      <AppIcon name="award" :size="12" /> Host
+    </span>
+    <span v-else-if="features.isModerator" class="badgeItem modBadge">
+      <AppIcon name="shield" :size="12" /> Moderator
+    </span>
+    <span v-else class="badgeItem attendeeBadge">
+      <AppIcon name="user" :size="12" /> Attendee
+    </span>
+  </div>
+
+  <!-- Top Moderation Changes Banner -->
+  <div
+    v-if="features.canModerate && features.pendingModerationChanges.length > 0"
+    class="modPendingBanner"
+    data-testid="mod-pending-banner"
+  >
+    <div
+      v-for="item in features.pendingModerationChanges"
+      :key="item.id"
+      class="modPendingItem"
+    >
+      <div class="modPendingText">
+        <span>Pending <strong>{{ item.type === 'whiteboard' ? 'Whiteboard' : 'Notes' }}</strong> from <strong>{{ item.authorName }}</strong></span>
+        <span class="modPendingTimer">(Auto-approves in 15s)</span>
+      </div>
+      <div class="modPendingButtons">
+        <button
+          type="button"
+          class="btnAccept"
+          @click="features.approveModerationChange(item.id, engine)"
+        >
+          Accept
+        </button>
+        <button
+          type="button"
+          class="btnReject"
+          @click="features.rejectModerationChange(item.id, engine)"
+        >
+          Reject
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Top-right Lobby Queue Dropdown Menu -->
   <div
     v-if="features.isHost || features.isModerator"
@@ -229,7 +342,17 @@ onBeforeUnmount(() => {
     <div v-if="showLobbyDropdown" class="lobbyDropdownCard">
       <div class="lobbyDropdownHeader">
         <h3>Waiting Room</h3>
-        <span class="lobbyCount">{{ features.lobbyWaiting.length }} waiting</span>
+        <div class="lobbyHeaderMeta">
+          <span class="lobbyCount">{{ features.lobbyWaiting.length }} waiting</span>
+          <button
+            v-if="features.lobbyWaiting.length > 1"
+            type="button"
+            class="btnDropdownAdmitAll"
+            @click="admitAll"
+          >
+            Admit all
+          </button>
+        </div>
       </div>
       <div class="lobbyDropdownBody">
         <div v-if="features.lobbyWaiting.length === 0" class="lobbyEmptyState">
@@ -331,8 +454,17 @@ onBeforeUnmount(() => {
         label="Moderator"
         :active="features.panel === 'moderator'"
         sound="panel"
+        :title="features.isHost ? 'Host Controls & Settings' : 'Moderator Controls'"
         @click="features.togglePanel('moderator')"
-      ><template #icon><AppIcon name="settings" /></template></IconButton>
+      ><template #icon><AppIcon :name="features.isHost ? 'settings' : 'shield'" /></template></IconButton>
+      <IconButton
+        v-else
+        label="Participants"
+        :active="features.panel === 'participants'"
+        sound="panel"
+        title="View Participants"
+        @click="features.togglePanel('participants')"
+      ><template #icon><AppIcon name="user" /></template></IconButton>
       <ChatPanel />
     </template>
   </FooterBar>
@@ -631,5 +763,269 @@ onBeforeUnmount(() => {
   animation: pulseBtn 2s infinite;
   background: var(--btn-primary-bg) !important;
   color: var(--btn-primary-fg) !important;
+}
+
+/* Floating Google Meet Admission Banner */
+.gmeetLobbyBanner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10003;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: rgba(15, 23, 42, 0.94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 9999px;
+  padding: 8px 18px 8px 10px;
+  box-shadow: 0 16px 36px -4px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(79, 110, 247, 0.25);
+  animation: bannerEnter 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: calc(100vw - 32px);
+}
+
+.bannerAvatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 13px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4);
+}
+
+.bannerText {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.bannerName {
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.bannerSubtitle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.bannerReason {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  font-style: italic;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bannerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 6px;
+}
+
+.btnBannerDeny {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 9999px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.12);
+  color: #f87171;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btnBannerDeny:hover {
+  background: rgba(239, 68, 68, 0.25);
+  color: #ffffff;
+}
+
+.btnBannerAdmit {
+  padding: 6px 16px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 9999px;
+  border: none;
+  background: #22c55e;
+  color: #ffffff;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(34, 197, 94, 0.4);
+  transition: all 0.15s ease;
+}
+
+.btnBannerAdmit:hover {
+  background: #16a34a;
+  transform: translateY(-1px);
+}
+
+.btnBannerAdmitAll {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 9999px;
+  border: 1px solid rgba(79, 110, 247, 0.4);
+  background: rgba(79, 110, 247, 0.2);
+  color: #818cf8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.btnBannerAdmitAll:hover {
+  background: rgba(79, 110, 247, 0.35);
+  color: #ffffff;
+}
+
+.btnDropdownAdmitAll {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 9999px;
+  border: 1px solid rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btnDropdownAdmitAll:hover {
+  background: #22c55e;
+  color: #ffffff;
+}
+
+.lobbyHeaderMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Session Role Indicator Badge */
+.sessionRoleBadge {
+  position: fixed;
+  top: 14px;
+  left: 170px;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+.badgeItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.badgeItem.hostBadge {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  color: #f59e0b;
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.2);
+}
+
+.badgeItem.modBadge {
+  background: rgba(139, 92, 246, 0.18);
+  border: 1px solid rgba(139, 92, 246, 0.45);
+  color: #a78bfa;
+  box-shadow: 0 0 12px rgba(139, 92, 246, 0.2);
+}
+
+.badgeItem.attendeeBadge {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.slide-down-enter-active,
+.slide-down-leave-active {
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s ease;
+}
+
+.slide-down-enter-from,
+.slide-down-leave-to {
+  transform: translate(-50%, -30px);
+  opacity: 0;
+}
+
+.modPendingBanner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 500px;
+  width: calc(100vw - 32px);
+  pointer-events: auto;
+}
+.modPendingItem {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid var(--line-dark, rgba(0, 0, 0, 0.15));
+  border-radius: 8px;
+  padding: 8px 14px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(8px);
+}
+.modPendingText {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text-default, #1e293b);
+}
+.modPendingTimer {
+  font-size: 11px;
+  color: var(--color-mono40, #64748b);
+}
+.modPendingButtons {
+  display: flex;
+  gap: 6px;
+}
+.btnAccept {
+  background: #10b981;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btnAccept:hover {
+  background: #059669;
+}
+.btnReject {
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btnReject:hover {
+  background: #dc2626;
 }
 </style>

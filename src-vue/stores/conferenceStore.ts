@@ -213,6 +213,13 @@ export const useConferenceStore = defineStore('conference', {
         editedAt,
       );
     },
+    removeChatMessage(messageId: string, nr?: number) {
+      this.messages = this.messages.filter((m) => {
+        if (messageId && m.messageId === messageId) return false;
+        if (nr !== undefined && m.nr === nr) return false;
+        return true;
+      });
+    },
     /** Drop Jitsi join state without clearing session features (transient reconnect). */
     clearJoinState() {
       this.conferenceObject = undefined;

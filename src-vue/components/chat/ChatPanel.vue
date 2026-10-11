@@ -7,6 +7,7 @@ import { useMediaEngine } from '@/composables/useMediaEngine';
 import { isChatReady } from '@/utils/chatConferenceReady';
 import { createChatMessage } from '@/utils/chatMessage';
 import {
+  canDeleteChatMessage,
   canEditChatMessage,
   chatAuthorStyle,
   formatEditedAt,
@@ -136,6 +137,25 @@ function saveEdit(messageId: string) {
   cancelEdit();
 }
 
+function deleteMessage(messageId: string, nr?: number) {
+  const message = conference.messages.find(
+    (m) => m.messageId === messageId || (nr !== undefined && m.nr === nr),
+  );
+  if (!message || !canDeleteChatMessage(message, localUserId.value, features.canModerate)) {
+    return;
+  }
+  conference.removeChatMessage(messageId, nr);
+  engine.sendCommand(
+    'chat',
+    JSON.stringify({
+      action: 'delete',
+      messageId,
+      nr: message.nr >= 0 ? message.nr : undefined,
+      senderId: localUserId.value,
+    }),
+  );
+}
+
 function onEditKeydown(e: KeyboardEvent, messageId: string) {
   if (e.key === 'Escape') {
     e.preventDefault();
@@ -215,7 +235,7 @@ watch(
   },
 );
 
-defineExpose({ open });
+defineExpose({ open, deleteMessage });
 </script>
 
 <template>
@@ -316,6 +336,18 @@ defineExpose({ open });
                 @click="startEdit(message.messageId, message.text)"
               >
                 Edit
+              </button>
+            </div>
+            <div
+              v-if="editingId !== message.messageId && canDeleteChatMessage(message, localUserId, features.canModerate)"
+              class="msgDeleteActions"
+            >
+              <button
+                type="button"
+                class="delBtn subtle"
+                @click="deleteMessage(message.messageId, message.nr)"
+              >
+                Delete
               </button>
             </div>
           </div>
@@ -437,6 +469,21 @@ defineExpose({ open });
 }
 .msgActions {
   margin-top: 6px;
+}
+.msgDeleteActions {
+  margin-top: 4px;
+}
+.delBtn {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--color-danger, #ef4444);
+  cursor: pointer;
+  line-height: 1.2;
+}
+.delBtn:hover {
+  text-decoration: underline;
 }
 .editBox {
   display: flex;

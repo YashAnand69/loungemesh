@@ -434,4 +434,161 @@ describe('SessionFeaturePanels', () => {
 
     wrapper.unmount();
   });
+
+  it('renders distinct moderator view without host room settings or grant tables', async () => {
+    const features = useSessionFeaturesStore();
+    const conference = useConferenceStore();
+    const local = useLocalStore();
+    local.setMyID('mod1');
+    features.setHost('host1');
+    features.userGrants['mod1'] = { moderator: true };
+    conference.addUser('host1', { _displayName: 'Host User' } as never);
+    conference.addUser('mod1', { _displayName: 'Mod User' } as never);
+    conference.addUser('attendee1', { _displayName: 'Attendee User' } as never);
+    features.panel = 'moderator';
+
+    const { wrapper } = await mountPanels();
+    await flushPromises();
+
+    expect(wrapper.find('.title').text()).toBe('Moderator Controls');
+    expect(wrapper.findComponent({ name: 'HostRoomSettingsSection' }).exists()).toBe(false);
+    expect(wrapper.find('.grantTable').exists()).toBe(false);
+
+    // Host user card cannot be muted or kicked by moderator
+    const hostCard = wrapper.findAll('.participantCard').find((c) => c.text().includes('Host User'));
+    expect(hostCard).toBeTruthy();
+    expect(hostCard!.find('button[title="Mute"]').exists()).toBe(false);
+    expect(hostCard!.find('button[title="Remove"]').exists()).toBe(false);
+
+    // Attendee card can be muted and kicked by moderator
+    const attendeeCard = wrapper.findAll('.participantCard').find((c) => c.text().includes('Attendee User'));
+    expect(attendeeCard).toBeTruthy();
+    expect(attendeeCard!.find('button[title="Mute"]').exists()).toBe(true);
+    expect(attendeeCard!.find('button[title="Remove"]').exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('renders read-only participants view for attendees', async () => {
+    const features = useSessionFeaturesStore();
+    const conference = useConferenceStore();
+    const local = useLocalStore();
+    local.setMyID('attendee1');
+    features.setHost('host1');
+    conference.addUser('host1', { _displayName: 'Host User' } as never);
+    conference.addUser('attendee1', { _displayName: 'Attendee User' } as never);
+    features.panel = 'participants';
+
+    const { wrapper } = await mountPanels();
+    await flushPromises();
+
+    expect(wrapper.find('.title').text()).toBe('Participants');
+    expect(wrapper.find('.grantTable').exists()).toBe(false);
+    expect(wrapper.find('.modActions').exists()).toBe(false);
+    expect(wrapper.findAll('.participantCard').length).toBe(2);
+
+    wrapper.unmount();
+  });
+
+  it('handles notes moderation queue in notes panel and moderator panel', async () => {
+    const features = useSessionFeaturesStore();
+    const local = useLocalStore();
+    const cmdSpy = vi.spyOn(getMediaEngineInstance(), 'sendCommand');
+
+    local.setMyID('host');
+    features.setHost('host');
+    features.panel = 'notes';
+
+    features.pendingModerationChanges = [
+      {
+        id: 'notes-mod-1',
+        type: 'notes',
+        authorId: 'guest-1',
+        authorName: 'Guest 1',
+        payload: 'Guest note edit',
+        timestamp: Date.now(),
+      },
+    ];
+
+    const { wrapper } = await mountPanels();
+    await flushPromises();
+
+    // Notes moderation queue in notes panel
+    const queue = wrapper.find('[data-testid="notes-mod-queue"]');
+    expect(queue.exists()).toBe(true);
+    expect(queue.text()).toContain('Guest 1');
+
+    await queue.find('.btnAccept').trigger('click');
+    expect(features.pendingModerationChanges).toHaveLength(0);
+    expect(features.sharedNotes).toBe('Guest note edit');
+
+    // Reject in notes panel
+    features.pendingModerationChanges = [
+      {
+        id: 'notes-mod-2',
+        type: 'notes',
+        authorId: 'guest-2',
+        authorName: 'Guest 2',
+        payload: 'Another note edit',
+        timestamp: Date.now(),
+      },
+    ];
+    await flushPromises();
+    const queue2 = wrapper.find('[data-testid="notes-mod-queue"]');
+    await queue2.find('.btnReject').trigger('click');
+    expect(features.pendingModerationChanges).toHaveLength(0);
+
+    // Switch to moderator panel
+    features.panel = 'moderator';
+    features.pendingModerationChanges = [
+      {
+        id: 'mod-change-3',
+        type: 'whiteboard',
+        authorId: 'guest-3',
+        authorName: 'Guest 3',
+        payload: { id: 's3' },
+        timestamp: Date.now(),
+      },
+    ];
+    await flushPromises();
+
+    const modList = wrapper.find('[data-testid="mod-queue-list"]');
+    expect(modList.exists()).toBe(true);
+    expect(modList.text()).toContain('Whiteboard');
+    expect(modList.text()).toContain('Guest 3');
+
+    await modList.find('.btnAccept').trigger('click');
+    expect(features.pendingModerationChanges).toHaveLength(0);
+
+    wrapper.unmount();
+  });
+
+  it('proposes notes edit as moderation change when non-moderator user edits notes', async () => {
+    const features = useSessionFeaturesStore();
+    const local = useLocalStore();
+    const cmdSpy = vi.spyOn(getMediaEngineInstance(), 'sendCommand');
+
+    local.setMyID('guest');
+    features.setHost('host'); // guest is attendee
+    features.setRoomDefault('notes', true);
+    features.panel = 'notes';
+
+    const { wrapper } = await mountPanels();
+    await flushPromises();
+
+    const ta = wrapper.find('.notesTa');
+    await ta.setValue('Attendee draft edit');
+    vi.advanceTimersByTime(500);
+
+    // Should propose change via mod_change command
+    expect(cmdSpy).toHaveBeenCalledWith(
+      'mod_change',
+      expect.stringContaining('"action":"propose"'),
+    );
+    expect(features.pendingModerationChanges).toHaveLength(1);
+    expect(features.pendingModerationChanges[0].payload).toBe('Attendee draft edit');
+
+    wrapper.unmount();
+  });
 });
+

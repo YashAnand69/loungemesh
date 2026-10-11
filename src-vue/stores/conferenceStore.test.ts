@@ -268,4 +268,23 @@ describe('conferenceStore', () => {
     store.clearUserTrack('u_test', 'screenshareAudio');
     expect(store.users['u_test'].screenshareAudio).toBeUndefined();
   });
+
+  it('removes chat messages by messageId and nr', () => {
+    const store = useConferenceStore();
+    store.messages = [
+      { id: 'u1', text: 'm1', nr: 1, messageId: 'msg-1' },
+      { id: 'u2', text: 'm2', nr: 2, messageId: 'msg-2' },
+      { id: 'u3', text: 'm3', nr: 3, messageId: 'msg-3' },
+    ];
+    store.removeChatMessage('msg-1');
+    expect(store.messages).toHaveLength(2);
+    expect(store.messages[0].messageId).toBe('msg-2');
+
+    store.removeChatMessage('', 2);
+    expect(store.messages).toHaveLength(1);
+    expect(store.messages[0].messageId).toBe('msg-3');
+
+    store.removeChatMessage('non-existent');
+    expect(store.messages).toHaveLength(1);
+  });
 });

@@ -137,14 +137,15 @@ export const useLocalStore = defineStore('local', {
       this.scale = scale;
       this.pan = clampPan(payload.pan, scale, this.roomBounds);
     },
-    resetViewportForRoom() {
+    resetViewportForRoom(targetScale?: number) {
       const conference = useConferenceStore();
       const existing = Object.values(conference.users).map((u) => u.pos);
       this.setLocalPosition(spreadInitialUserPosition(existing));
+      const scaleToUse = targetScale !== undefined ? clampScale(targetScale) : defaultScale;
       const centerNow = () => {
         if (typeof window === 'undefined' || window.innerWidth < 200 || window.innerHeight < 200) return;
-        const pan = initialPanCenterOnUser(this.pos, defaultScale);
-        this.setPanZoom({ pan, scale: defaultScale });
+        const pan = initialPanCenterOnUser(this.pos, scaleToUse);
+        this.setPanZoom({ pan, scale: scaleToUse });
         this.calculateUsersOnScreen();
       };
       centerNow();

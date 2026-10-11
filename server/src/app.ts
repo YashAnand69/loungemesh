@@ -6,7 +6,10 @@ import dotenv from 'dotenv';
 import authRoutes from './routes/authRoutes.js';
 import meetingRoutes from './routes/meetingRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
+import oauthRoutes from './oauth/routes.js';
+import integrationRoutes from './integration/routes.js';
 import { parseUserSession, apiLimiter } from './middleware/auth.js';
+import { parseAccessSession } from './integration/access.js';
 
 dotenv.config();
 
@@ -23,8 +26,35 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
   'http://localhost:8780',
   'http://127.0.0.1:8780',
-  ...extraOrigins
+  'http://localhost:8000',
+  'http://127.0.0.1:8000',
+  'http://localhost:8880',
+  'https://eventyay.com',
+  ...extraOrigins,
 ];
+
+export function isOriginAllowed(origin: string, extraList: string[] = allowedOrigins): boolean {
+  if (extraList.includes(origin)) return true;
+  try {
+    const url = new URL(origin);
+    const hostname = url.hostname;
+    // Allow localhost, loopback, and local development on any port
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === 'host.docker.internal') {
+      return true;
+    }
+    // Allow eventyay.com, dev.eventyay.com, and any *.eventyay.com subdomain
+    if (hostname === 'eventyay.com' || hostname.endsWith('.eventyay.com')) {
+      return true;
+    }
+    for (const pat of extraList) {
+      if (pat.includes('*')) {
+        const regex = new RegExp('^' + pat.replace(/\./g, '\\.').replace(/\*/g, '.*') + '$');
+        if (regex.test(origin)) return true;
+      }
+    }
+  } catch {}
+  return false;
+}
 
 app.use(
   cors((req: any, callback) => {
@@ -35,7 +65,7 @@ app.use(
     if (!origin) {
       isAllowed = true;
     } else {
-      if (allowedOrigins.includes(origin)) {
+      if (isOriginAllowed(origin)) {
         isAllowed = true;
       } else {
         try {
@@ -60,11 +90,15 @@ app.use(cookieParser());
 
 // Apply global session parser to decrypt token cookies
 app.use(parseUserSession);
+app.use(parseAccessSession);
 
 // Apply rate limiting to all API endpoints
 app.use('/api', apiLimiter);
 
 // Register routes
+app.use('/oauth', oauthRoutes);
+app.use('/api/integration', integrationRoutes);
+app.use('/api', integrationRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/meetings', meetingRoutes);
 app.use('/api/calendar', calendarRoutes);

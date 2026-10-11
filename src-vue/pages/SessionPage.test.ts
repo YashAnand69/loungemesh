@@ -760,7 +760,154 @@ describe('SessionPage', () => {
     expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"action":"reject"'));
     expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-2"'));
 
+    // Test dropdown admit all when multiple waiters exist
+    features.lobbyWaiting = [
+      { id: 'guest-3', name: 'Charlie' },
+      { id: 'guest-4', name: 'Dave' },
+    ];
+    await flushPromises();
+    const dropdownAdmitAll = wrapper.find('.btnDropdownAdmitAll');
+    expect(dropdownAdmitAll.exists()).toBe(true);
+    await dropdownAdmitAll.trigger('click');
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-3"'));
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-4"'));
+
+    // Test dropdown empty state when no waiters
+    features.lobbyWaiting = [];
+    await flushPromises();
+    expect(wrapper.find('.lobbyEmptyState').exists()).toBe(true);
+
+    // Test moderator role badge
+    features.setHost('someone-else');
+    features.isVerifiedHost = false;
+    features.isVerifiedModerator = true;
+    await flushPromises();
+    expect(wrapper.find('.sessionRoleBadge .modBadge').exists()).toBe(true);
+
+    wrapper.unmount();
+  });
+
+  it('renders floating Google Meet lobby admission banner and handles admit, deny, and admit all', async () => {
+    const local = useLocalStore();
+    const features = useSessionFeaturesStore();
+    local.setMyID('host');
+    features.setHost('host');
+    features.lobbyWaiting = [
+      { id: 'guest-1', name: 'Bob' },
+      { id: 'guest-2', name: 'Alice' },
+    ];
+
+    const cmdSpy = vi.spyOn(getMediaEngineInstance(), 'sendCommand');
+
+    const { wrapper } = await mountWithApp(SessionPage, {
+      route: '/session/loungemesh',
+      props: { id: 'loungemesh' },
+      global: { stubs: sessionStubs },
+    });
+    await flushPromises();
+
+    const banner = wrapper.find('.gmeetLobbyBanner');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain('Bob');
+    expect(banner.text()).toContain('and 1 other(s) want to join');
+    expect(banner.find('.btnBannerAdmitAll').exists()).toBe(true);
+
+    await banner.find('.btnBannerAdmit').trigger('click');
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"action":"approve"'));
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-1"'));
+
+    // Reset with 2 waiters to test admit all
+    features.lobbyWaiting = [
+      { id: 'guest-1', name: 'Bob' },
+      { id: 'guest-2', name: 'Alice' },
+    ];
+    await flushPromises();
+
+    await banner.find('.btnBannerAdmitAll').trigger('click');
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-1"'));
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-2"'));
+
+    // Test banner deny with fallback name
+    features.lobbyWaiting = [
+      { id: 'guest-1', name: '' },
+    ];
+    await flushPromises();
+
+    await banner.find('.btnBannerDeny').trigger('click');
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"action":"reject"'));
+    expect(cmdSpy).toHaveBeenCalledWith('lobby', expect.stringContaining('"id":"guest-1"'));
+
+    wrapper.unmount();
+  });
+
+  it('shows participants control for attendee and toggles participants panel', async () => {
+    const local = useLocalStore();
+    const features = useSessionFeaturesStore();
+    local.setMyID('guest');
+    features.setHost('host');
+
+    const { wrapper } = await mountWithApp(SessionPage, {
+      route: '/session/loungemesh',
+      props: { id: 'loungemesh' },
+      global: { stubs: sessionStubs },
+    });
+    await flushPromises();
+
+    const participantsBtn = wrapper.find('[aria-label="Participants"]');
+    expect(participantsBtn.exists()).toBe(true);
+    await participantsBtn.trigger('click');
+    expect(features.panel).toBe('participants');
+
+    wrapper.unmount();
+  });
+
+  it('renders pending moderation banner and approves/rejects changes', async () => {
+    const local = useLocalStore();
+    const features = useSessionFeaturesStore();
+    local.setMyID('host');
+    features.setHost('host');
+
+    features.pendingModerationChanges = [
+      {
+        id: 'mod-1',
+        type: 'whiteboard',
+        authorId: 'guest-1',
+        authorName: 'Guest 1',
+        payload: { id: 's1', points: [] },
+        timestamp: Date.now(),
+      },
+      {
+        id: 'mod-2',
+        type: 'notes',
+        authorId: 'guest-2',
+        authorName: 'Guest 2',
+        payload: 'test notes',
+        timestamp: Date.now(),
+      },
+    ];
+
+    const { wrapper } = await mountWithApp(SessionPage, {
+      route: '/session/loungemesh',
+      props: { id: 'loungemesh' },
+      global: { stubs: sessionStubs },
+    });
+    await flushPromises();
+
+    const banner = wrapper.find('[data-testid="mod-pending-banner"]');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain('Whiteboard');
+    expect(banner.text()).toContain('Guest 1');
+
+    const acceptBtn = banner.find('.btnAccept');
+    await acceptBtn.trigger('click');
+    expect(features.pendingModerationChanges).toHaveLength(1);
+
+    const rejectBtn = banner.find('.btnReject');
+    await rejectBtn.trigger('click');
+    expect(features.pendingModerationChanges).toHaveLength(0);
+
     wrapper.unmount();
   });
 });
+
 

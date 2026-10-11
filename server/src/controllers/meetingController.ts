@@ -4,6 +4,7 @@ import { redisClient } from '../config/redis.js';
 import { decryptToken, encryptToken } from '../utils/crypto.js';
 import { OAuth2Client } from 'google-auth-library';
 import { sendMeetingInvitation } from '../utils/mailer.js';
+import { LoungeMeshRole, normalizeRole } from '../integration/roles.js';
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
@@ -177,6 +178,7 @@ export async function createMeeting(req: Request, res: Response) {
     recurrence, 
     syncGoogleCal, 
     guestEmails,
+    attendeeEmails,
     moderatorEmails,
     lobbyEnabled,
     stagePromotionEnabled,
@@ -194,7 +196,8 @@ export async function createMeeting(req: Request, res: Response) {
     return res.status(401).json({ error: 'Unauthorized: Account required to create meeting' });
   }
 
-  const guests = Array.isArray(guestEmails) ? guestEmails : [];
+  const attendeeInput = attendeeEmails ?? guestEmails;
+  const guests = Array.isArray(attendeeInput) ? attendeeInput : [];
   const moderators = Array.isArray(moderatorEmails) ? moderatorEmails : [];
 
   try {
@@ -331,6 +334,7 @@ export async function updateMeeting(req: Request, res: Response) {
     endTime,
     recurrence,
     guestEmails,
+    attendeeEmails,
     moderatorEmails,
     lobbyEnabled,
     stagePromotionEnabled,
@@ -369,7 +373,8 @@ export async function updateMeeting(req: Request, res: Response) {
     const start = startTime ? new Date(startTime) : meeting.startTime;
     const end = endTime ? new Date(endTime) : meeting.endTime;
     const rec = recurrence !== undefined ? recurrence : meeting.recurrence;
-    const guests = Array.isArray(guestEmails) ? guestEmails : meeting.guestEmails;
+    const attendeeInput = attendeeEmails ?? guestEmails;
+    const guests = Array.isArray(attendeeInput) ? attendeeInput : meeting.guestEmails;
     const moderators = Array.isArray(moderatorEmails) ? moderatorEmails : meeting.moderatorEmails;
 
     const updated = await prisma.meeting.update({
@@ -524,14 +529,14 @@ export async function cancelMeeting(req: Request, res: Response) {
 // ── Meeting Configurations & Roles (Cashed via Redis) ───────────────────────
 
 // Helper to determine role of a user in a meeting
-async function getMeetingRoleForUser(roomName: string, userId?: string): Promise<'host' | 'moderator' | 'guest'> {
-  if (!userId) return 'guest';
+async function getMeetingRoleForUser(roomName: string, userId?: string): Promise<LoungeMeshRole> {
+  if (!userId) return 'attendee';
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { roomName },
       include: { configs: true },
     });
-    if (!meeting) return 'guest';
+    if (!meeting) return 'attendee';
     if (meeting.hostId === userId) return 'host';
     if (meeting.configs?.userGrants) {
       const grants = JSON.parse(meeting.configs.userGrants);
@@ -546,10 +551,10 @@ async function getMeetingRoleForUser(roomName: string, userId?: string): Promise
     if (user && meeting.moderatorEmails.includes(user.email)) {
       return 'moderator';
     }
-    return 'guest';
+    return 'attendee';
   } catch (err) {
     console.error('Error in getMeetingRoleForUser:', err);
-    return 'guest';
+    return 'attendee';
   }
 }
 
@@ -558,11 +563,24 @@ export async function getMeetingRole(req: Request, res: Response) {
   try {
     const meeting = await prisma.meeting.findUnique({
       where: { roomName },
-      select: { hostId: true, guestEmails: true, moderatorEmails: true }
+      select: { hostId: true, guestEmails: true, moderatorEmails: true, eventyayEventSlug: true }
     });
     if (!meeting) {
-      return res.json({ role: 'guest', hostId: null, isInvited: false });
+      return res.json({ role: 'attendee', hostId: null, isInvited: false });
     }
+
+    // For Eventyay-linked meets, role is determined solely by the validated grant session
+    if (meeting.eventyayEventSlug) {
+      if (req.access && req.access.room === roomName) {
+        return res.json({
+          role: normalizeRole(req.access.role),
+          hostId: meeting.hostId,
+          isInvited: !req.access.sub?.startsWith('guest:'),
+        });
+      }
+      return res.json({ role: 'attendee', hostId: meeting.hostId, isInvited: false });
+    }
+
     const role = await getMeetingRoleForUser(roomName, req.user?.id);
     let isInvited = false;
     if (req.user?.email) {

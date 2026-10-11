@@ -7,10 +7,18 @@ describe('AccessDeniedPage', () => {
   beforeEach(() => setActivePinia(createPinia()));
 
   const reasons = [
-    'no_token',
+    'room_full',
+    'not_allowed',
+    'grant_expired',
     'token_expired',
+    'single_user_replayed',
+    'token_already_claimed',
+    'invalid_pin',
+    'grant_replayed',
     'token_already_used',
+    'meet_not_found',
     'event_not_found',
+    'no_token',
     'network_error',
     undefined,
   ] as const;

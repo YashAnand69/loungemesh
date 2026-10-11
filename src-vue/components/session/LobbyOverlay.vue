@@ -6,6 +6,7 @@ import { useConferenceStore } from '@/stores/conferenceStore';
 import { useLocalStore } from '@/stores/localStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useMediaEngine } from '@/composables/useMediaEngine';
+import AppIcon from '@/components/ui/AppIcon.vue';
 
 const features = useSessionFeaturesStore();
 const conference = useConferenceStore();
@@ -103,6 +104,14 @@ async function exitLobby() {
 
       <!-- Waiting Approval View -->
       <template v-else-if="features.localLobbyPending">
+        <div class="gmeetRadar" aria-hidden="true">
+          <div class="radarRing ring1"></div>
+          <div class="radarRing ring2"></div>
+          <div class="radarRing ring3"></div>
+          <div class="radarCore">
+            <AppIcon name="user" :size="28" />
+          </div>
+        </div>
         <div class="spinner"></div>
         <h2 class="title">Asking to join...</h2>
         <p class="sub">
@@ -112,6 +121,31 @@ async function exitLobby() {
           <span class="previewLabel">Requesting as:</span>
           <span class="previewValue">{{ guestName }}</span>
         </div>
+
+        <!-- Live device preview toggles while waiting in lobby -->
+        <div class="deviceToggles">
+          <button
+            type="button"
+            class="deviceBtn"
+            :class="{ active: !local.mute, warning: local.mute }"
+            @click="local.toggleMute()"
+            :title="local.mute ? 'Unmute microphone' : 'Mute microphone'"
+          >
+            <AppIcon :name="local.mute ? 'mic-off' : 'mic'" :size="16" />
+            <span>{{ local.mute ? 'Mic Off' : 'Mic On' }}</span>
+          </button>
+          <button
+            type="button"
+            class="deviceBtn"
+            :class="{ active: !local.cameraOff, warning: local.cameraOff }"
+            @click="local.toggleCamera()"
+            :title="local.cameraOff ? 'Turn on camera' : 'Turn off camera'"
+          >
+            <AppIcon :name="local.cameraOff ? 'video-off' : 'video'" :size="16" />
+            <span>{{ local.cameraOff ? 'Camera Off' : 'Camera On' }}</span>
+          </button>
+        </div>
+
         <button type="button" class="btnCancel" @click="exitLobby">
           Cancel Request
         </button>
@@ -514,5 +548,95 @@ async function exitLobby() {
 
 .btnExit:hover {
   background: #e03131;
+}
+
+/* Google Meet style Waiting Lobby Radar & Device Controls */
+.gmeetRadar {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  margin: 0 auto 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.radarCore {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #4f46e5 0%, #3b82f6 100%);
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 4px 14px rgba(79, 70, 229, 0.4);
+  z-index: 2;
+}
+
+.radarRing {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(79, 110, 247, 0.4);
+  animation: radarPulse 2.4s cubic-bezier(0.215, 0.61, 0.355, 1) infinite;
+}
+
+.radarRing.ring2 {
+  animation-delay: 0.8s;
+}
+
+.radarRing.ring3 {
+  animation-delay: 1.6s;
+}
+
+@keyframes radarPulse {
+  0% {
+    transform: scale(0.6);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+
+.deviceToggles {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin: 16px 0 20px;
+}
+
+.deviceBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-default);
+  transition: all 0.2s ease;
+}
+
+.deviceBtn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.deviceBtn.warning {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.12);
+  color: #ef4444;
+}
+
+.deviceBtn.active {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
 }
 </style>

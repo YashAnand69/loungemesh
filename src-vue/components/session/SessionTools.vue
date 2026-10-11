@@ -76,7 +76,7 @@ function openPanel(name: 'notes' | 'whiteboard') {
     >
       <template #icon><AppIcon name="hand" /></template>
     </IconButton>
-    <div v-if="features.canUsePoll || features.isHost || features.isModerator" class="toolWrap">
+    <div v-if="features.canAccessPoll" class="toolWrap">
       <IconButton
         label="Poll"
         :active="features.panel === 'poll'"

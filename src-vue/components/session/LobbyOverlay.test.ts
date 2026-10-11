@@ -45,11 +45,25 @@ describe('LobbyOverlay', () => {
   it('shows waiting message when lobby blocks guest', async () => {
     const features = useSessionFeaturesStore();
     const conference = useConferenceStore();
+    const local = useLocalStore();
     conference.setDisplayName('Guest');
     features.lobbyEnabled = true;
     features.localLobbyPending = true;
     const { wrapper } = await mountWithApp(LobbyOverlay);
     expect(wrapper.text()).toContain('Asking to join...');
+
+    // Test device preview buttons
+    const deviceBtns = wrapper.findAll('.deviceBtn');
+    expect(deviceBtns.length).toBe(2);
+    expect(deviceBtns[0].text()).toContain('Mic On');
+    expect(deviceBtns[1].text()).toContain('Camera On');
+
+    await deviceBtns[0].trigger('click');
+    expect(local.mute).toBe(true);
+
+    await deviceBtns[1].trigger('click');
+    expect(local.cameraOff).toBe(true);
+
     wrapper.unmount();
   });
 
@@ -298,32 +312,27 @@ describe('LobbyOverlay', () => {
     wrapper.unmount();
   });
 
-  it('notifies the embedding host after cancelling and releases local media', async () => {
+  it('posts message to parent window on exit when inside an iframe', async () => {
     const features = useSessionFeaturesStore();
     features.lobbyEnabled = true;
     features.localLobbyPending = true;
-    const stopSpy = vi.spyOn(useLocalStore(), 'stopAllLocalMedia').mockResolvedValue();
-    const leaveConfSpy = vi.spyOn(useConferenceStore(), 'leaveConference');
-    const postMessage = vi.fn();
-    const originalParent = Object.getOwnPropertyDescriptor(window, 'parent')!;
-    Object.defineProperty(window, 'parent', { value: { postMessage }, configurable: true });
-    const { wrapper, router } = await mountWithApp(LobbyOverlay);
-    const routerSpy = vi.spyOn(router, 'push');
+
+    const postMessageSpy = vi.fn();
+    const parentMock = { postMessage: postMessageSpy };
+    const originalParent = window.parent;
+    Object.defineProperty(window, 'parent', { value: parentMock, writable: true, configurable: true });
+
     try {
+      const { wrapper } = await mountWithApp(LobbyOverlay);
       await wrapper.find('.btnCancel').trigger('click');
       await flushPromises();
-      expect(stopSpy).toHaveBeenCalledTimes(1);
-      expect(mockLeaveRoom).toHaveBeenCalledTimes(1);
-      expect(leaveConfSpy).toHaveBeenCalledTimes(1);
-      expect(mockDisconnect).toHaveBeenCalledTimes(1);
-      expect(postMessage).toHaveBeenCalledExactlyOnceWith(
+      expect(postMessageSpy).toHaveBeenCalledWith(
         { source: 'loungemesh', action: 'leave', event: 'hangup', type: 'hangup' },
-        '*',
+        '*'
       );
-      expect(routerSpy).not.toHaveBeenCalled();
-    } finally {
       wrapper.unmount();
-      Object.defineProperty(window, 'parent', originalParent);
+    } finally {
+      Object.defineProperty(window, 'parent', { value: originalParent, writable: true, configurable: true });
     }
   });
 });

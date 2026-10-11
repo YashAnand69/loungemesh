@@ -1,4 +1,4 @@
-import { canApplyChatEdit } from '@/utils/chatMessage';
+import { canApplyChatEdit, findChatMessage } from '@/utils/chatMessage';
 import * as Y from 'yjs';
 import { useConferenceStore } from '@/stores/conferenceStore';
 import { useSessionFeaturesStore } from '@/stores/sessionFeaturesStore';
@@ -93,6 +93,9 @@ export function handleSessionCommand(name: string, payload: CommandPayload, send
           email: data.email,
           reason: data.reason,
         });
+        if (features.isHost || features.isModerator) {
+          playUiSound('lobbyKnock');
+        }
       }
       if (data.action === 'approve' && data.id) {
         features.approveLobby(data.id);
@@ -143,6 +146,32 @@ export function handleSessionCommand(name: string, payload: CommandPayload, send
       if (pollActivityChanged(prev, features.activePoll)) {
         features.bumpPollActivity();
         if (panelClosed) playUiSound('chatMessage');
+      }
+      features.pollRequestNotice = '';
+      break;
+    }
+    case 'poll_req': {
+      const data = parse<{
+        action?: 'create' | 'approve' | 'reject' | 'cancel';
+        request?: import('@/stores/sessionFeaturesStore').PollRequest;
+        requestId?: string;
+      }>(payload);
+      if (!data?.action) break;
+      if (data.action === 'create' && data.request?.id) {
+        features.addPollRequest(data.request);
+        if (features.isHost || features.isModerator) {
+          features.bumpPollActivity();
+          if (features.panel !== 'poll') playUiSound('chatMessage');
+        }
+      } else if (data.action === 'approve' && data.requestId) {
+        features.removePollRequest(data.requestId);
+      } else if (data.action === 'reject' && data.requestId) {
+        if (features.myPendingPollRequestId === data.requestId) {
+          features.pollRequestNotice = 'Your poll request was declined by a moderator.';
+        }
+        features.removePollRequest(data.requestId);
+      } else if (data.action === 'cancel' && data.requestId) {
+        features.removePollRequest(data.requestId);
       }
       break;
     }
@@ -237,6 +266,7 @@ export function handleSessionCommand(name: string, payload: CommandPayload, send
         editedAt?: number;
         editorId?: string;
         nr?: number;
+        senderId?: string;
       }>(payload);
       if (
         data?.action === 'edit' &&
@@ -244,6 +274,7 @@ export function handleSessionCommand(name: string, payload: CommandPayload, send
         data.text != null &&
         data.editedAt != null &&
         data.editorId &&
+        (!senderId || senderId === data.editorId) &&
         canApplyChatEdit(conference.messages, data.messageId, data.editorId, data.nr)
       ) {
         conference.editChatMessage(
@@ -253,6 +284,48 @@ export function handleSessionCommand(name: string, payload: CommandPayload, send
           data.nr,
           data.editorId,
         );
+      }
+      if (data?.action === 'delete') {
+        const caller = senderId || data.senderId;
+        const isMod = isSenderModeratorOrHost(caller, features);
+        const msg = findChatMessage(conference.messages, {
+          messageId: data.messageId || '',
+          nr: data.nr,
+          authorId: caller,
+        });
+        const isOwner = Boolean(caller && msg && msg.id === caller);
+        if (isMod || isOwner) {
+          conference.removeChatMessage(data.messageId || '', data.nr);
+        }
+      }
+      break;
+    }
+    case 'mod_change': {
+      const data = parse<{
+        action?: 'propose' | 'approve' | 'reject';
+        id?: string;
+        type?: 'whiteboard' | 'notes';
+        authorId?: string;
+        authorName?: string;
+        payload?: any;
+        timestamp?: number;
+      }>(payload);
+      if (!data?.action || !data.id) break;
+      if (data.action === 'propose' && data.type && data.payload) {
+        features.addModerationChange({
+          id: data.id,
+          type: data.type,
+          authorId: data.authorId || '',
+          authorName: data.authorName || '',
+          payload: data.payload,
+          timestamp: data.timestamp || 0,
+        }, getMediaEngineInstance());
+      } else if (data.action === 'approve') {
+        if (senderId && !isSenderModeratorOrHost(senderId, features)) break;
+        features.approveModerationChange(data.id, undefined, true);
+      } else {
+        if (senderId && !isSenderModeratorOrHost(senderId, features)) break;
+        features.rejectModerationChange(data.id);
       }
       break;
     }
